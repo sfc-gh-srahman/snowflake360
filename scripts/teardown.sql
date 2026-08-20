@@ -24,6 +24,10 @@
 
 USE ROLE ACCOUNTADMIN;
 
+-- If this line errors with "003107: Current session is restricted", your account
+-- has a session policy that blocks role switching. Select ACCOUNTADMIN from the
+-- role picker in the worksheet header instead, and delete this line.
+
 /*******************************************************************************
  * SECTION 0 -- OPTIONAL: KEEP YOUR CONFIGURATION FIRST
  *
@@ -106,12 +110,20 @@ DROP ROLE IF EXISTS SF360_APP_ROLE;
 
 /*******************************************************************************
  * SECTION 5 -- CONFIRM
+ *
+ * SHOW rather than SELECT, deliberately. Section 4 just dropped SF360_WH, which
+ * was almost certainly the session's warehouse, so any query needing compute
+ * would fail here with "no active warehouse selected". SHOW reads metadata only
+ * and needs no warehouse, so it still works on the way out.
+ *
+ * Each of the four should return zero rows. Anything that comes back is left over.
  ******************************************************************************/
 
-SELECT
-  (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASES
-    WHERE DATABASE_NAME = 'SF360' AND DELETED IS NULL)             AS DATABASE_REMAINING,
-  'Teardown complete. ACCOUNT_USAGE views are untouched -- Snowflake360 only ever read them, so re-running setup.sql rebuilds everything except the configuration you entered.' AS NOTE;
+SHOW DATABASES        LIKE 'SF360';
+SHOW WAREHOUSES       LIKE 'SF360_WH';
+SHOW ROLES            LIKE 'SF360_APP_ROLE';
+SHOW API INTEGRATIONS LIKE 'SF360_GIT_API';
 
-SHOW WAREHOUSES LIKE 'SF360_WH';
-SHOW ROLES LIKE 'SF360_APP_ROLE';
+-- ACCOUNT_USAGE and ORGANIZATION_USAGE are untouched. Snowflake360 only ever read
+-- them, so re-running setup.sql rebuilds everything except the configuration you
+-- entered by hand -- which is why section 0 exists.

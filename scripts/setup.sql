@@ -41,10 +41,27 @@
 
 USE ROLE ACCOUNTADMIN;
 
+-- If this line errors with "003107: Current session is restricted", your account
+-- has a session policy that blocks role switching. Select ACCOUNTADMIN from the
+-- role picker in the worksheet header instead, and delete this line.
+
 ALTER SESSION SET QUERY_TAG = '{"origin":"sf_sit","name":"snowflake360","version":{"major":1,"minor":0},"attributes":{"is_quickstart":0,"source":"sql"}}';
 
 -- Docs mandate UTC when reconciling ACCOUNT_USAGE against ORGANIZATION_USAGE.
 ALTER SESSION SET TIMEZONE = 'UTC';
+
+-- OPTIONAL -- only if your account is NOT in a Cortex-native region.
+--
+-- Order form extraction calls AI_PARSE_DOCUMENT and AI_EXTRACT. In a region where
+-- those models are not hosted, the calls fail rather than routing themselves, and
+-- because the extraction runs inside a task you will see an empty EXTRACTED table
+-- with no obvious error. Allowing cross-region inference avoids that.
+--
+-- This sends inference payloads outside your region, so it is left commented for
+-- you to make that call deliberately. Nothing else in Snowflake360 needs Cortex --
+-- entering the contract by hand is the primary documented path either way.
+--
+-- ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';
 
 SET SF360_USER = (SELECT CURRENT_USER());
 
@@ -162,12 +179,22 @@ USE WAREHOUSE SF360_WH;
 
 -- ORGANIZATION_USAGE exists only in an organization account. Without it the app
 -- reports on this account alone, which is a smaller but entirely valid picture.
+--
+-- Note what is being tested: whether the view is READABLE, not whether it has rows.
+-- Those come apart on a new organization account, where the views exist and grant
+-- fine but return nothing until Snowflake's billing pipeline has populated them --
+-- typically 24-48 hours after first use. MODE = 'ORG' is the correct answer there:
+-- the account genuinely is an organization account, and the org pages will fill in
+-- on their own. Until they do, those pages explain that they are empty. Setting
+-- MODE = 'ACCOUNT' on a row count of zero would be wrong, and would leave the app
+-- permanently understating what the account can do.
 DECLARE
-  org_ok  BOOLEAN DEFAULT FALSE;
-  mode    VARCHAR;
+  org_ok    BOOLEAN DEFAULT FALSE;
+  org_rows  INTEGER DEFAULT 0;
+  mode      VARCHAR;
 BEGIN
   BEGIN
-    LET probe INTEGER := (
+    org_rows := (
       SELECT COUNT(*) FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
        WHERE USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE())
     );
@@ -186,9 +213,11 @@ BEGIN
   WHEN NOT MATCHED THEN INSERT (SETTING_KEY, SETTING_VALUE) VALUES (s.K, s.V);
 
   RETURN 'MODE set to ' || mode
-         || IFF(org_ok,
-                ' -- organization-wide reporting is available.',
-                ' -- ORGANIZATION_USAGE is not reachable from this account, so the app reports on this account only. Org-scoped panels will say so rather than showing zeros.');
+         || IFF(NOT org_ok,
+                ' -- ORGANIZATION_USAGE is not reachable from this account, so the app reports on this account only. Org-scoped panels will say so rather than showing zeros.',
+                IFF(org_rows > 0,
+                    ' -- organization-wide reporting is available (' || org_rows || ' rows of org usage in the last 7 days).',
+                    ' -- this IS an organization account, but ORGANIZATION_USAGE returned 0 rows for the last 7 days, so org-wide and currency pages will be empty for now. That is normal on a new organization account; Snowflake populates these views 24-48 hours after first use. Nothing to fix -- re-check tomorrow.'));
 END;
 
 /*******************************************************************************

@@ -63,7 +63,7 @@ nothing leaves your account.
 | Requirement | Why | If you do not have it |
 |---|---|---|
 | `ACCOUNTADMIN` | Creates the database, role, warehouse and API integration | Setup will fail. Ongoing use needs only `SF360_APP_ROLE`. |
-| Cortex available in your region | Order form extraction uses `AI_PARSE_DOCUMENT` / `AI_EXTRACT` | Everything else works. Enter contract terms manually instead. |
+| Cortex available in your region | Order form extraction uses `AI_PARSE_DOCUMENT` / `AI_EXTRACT` | Everything else works. Enter contract terms manually instead, or enable [cross-region inference](#cortex-and-order-forms). |
 | An **organization account** | `ORGANIZATION_USAGE` powers the org-wide and currency views | Setup detects this and sets `MODE = 'ACCOUNT'`. The app reports on this account only and says so — org panels explain their absence rather than showing zeros. |
 | Usage history | Every figure comes from your own account | See "What to expect on a new account" below. |
 
@@ -86,6 +86,14 @@ OBJECTS_BUILT  REPORTING_MODE  DAYS_OF_HISTORY  CHECKS_PASSING  ACTIVE_CONTRACTS
 
 Panels that cannot be computed say why. You will not see a blank chart or a `$0.00`
 standing in for "no data yet".
+
+One case is worth calling out because it looks like a bug and is not: a **new
+organization account** reports `MODE = 'ORG'` and still shows empty org-wide and
+currency pages. `ORGANIZATION_USAGE` is readable there from day one, but Snowflake
+populates it 24–48 hours after first use, so `RATE_SHEET_DAILY` and its neighbours
+return zero rows in the meantime. The mode is right and the pages fill in on their
+own — see
+[Empty panels](#empty-panels).
 
 ---
 
@@ -376,33 +384,99 @@ numbered file is the record of why.
 
 ## Troubleshooting
 
-**Org-wide pages say organization data is unavailable.** Expected outside an
-organization account. Setup sets `MODE = 'ACCOUNT'`; per-account reporting still works.
+Entries are ordered roughly by how likely you are to hit them.
 
-**Verification checks fail right after setup.** Most of the 23 depend on a contract.
-Enter one on Setup & Settings and re-run `python tests/verification.py`.
+### Setup
 
-**Order form extraction fails.** Needs Cortex in your region and
-`SNOWFLAKE.CORTEX_USER` on the role, which `grants.sql` grants. Check with
-`SELECT AI_COMPLETE('claude-4-sonnet','ok');` as `SF360_APP_ROLE`. Enter the contract
-manually in the meantime.
+**`003107: Current session is restricted` on `USE ROLE ACCOUNTADMIN`.** Your account
+has a session policy that blocks role switching mid-session. Pick `ACCOUNTADMIN` from
+the role selector in the worksheet header, delete the `USE ROLE` line, and run the
+rest. Both `setup.sql` and `teardown.sql` carry this note inline.
 
-**The app is empty.** Check `DAYS_OF_HISTORY` from the setup output. A new account has
-little history, and Snowflake360 reports only what you actually used.
+**Setup finishes but `CHECKS_PASSING` is low.** Most of the 23 checks depend on a
+contract, and setup does not invent one. Enter yours on Setup & Settings, then re-run
+`python tests/verification.py`.
+
+**Re-running setup leaves the checks failing.** Re-running recreates the LANDING
+tables empty, because they are derived and rebuilt nightly. `setup.sql` reloads them
+in Section 6, so a full re-run is fine — but if you ran only the DDL, call the four
+`SP_REBUILD_LANDING*` procedures and then `SP_REFRESH_CURATED` before judging the
+checks.
+
+### Empty panels
+
+**The app is largely empty.** Check `DAYS_OF_HISTORY` in the setup output. A new
+account has little history, and Snowflake360 reports only what you actually used —
+it ships no sample data on purpose. See
+[What to expect on a new account](#what-to-expect-on-a-new-account).
+
+**Org-wide and currency pages are empty, and `REPORTING_MODE` is `ACCOUNT`.** Expected
+outside an organization account: `ORGANIZATION_USAGE` is not reachable, so setup set
+`MODE = 'ACCOUNT'`. Per-account reporting is unaffected. Nothing to fix.
+
+**Org-wide and currency pages are empty, but `REPORTING_MODE` is `ORG`.** Different
+problem, and usually a new organization account. The views exist and you can read
+them, but Snowflake has not populated them yet — that lands 24–48 hours after the
+account is first used. Confirm with:
+
+```sql
+SELECT COUNT(*) FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY;
+SELECT COUNT(*) FROM SNOWFLAKE.ORGANIZATION_USAGE.RATE_SHEET_DAILY;
+```
+
+Zero rows on a queryable view means wait, not fix. `MODE` is deliberately set on
+whether the views are *readable*, not whether they have rows — the account genuinely
+is an organization account, and these pages fill in on their own. Setting
+`MODE = 'ACCOUNT'` here would permanently understate what the account can do.
+
+**Rates tab says the rate sheet is unavailable.** Same cause as above.
+`RATE_SHEET_DAILY` is an `ORGANIZATION_USAGE` view; on a trial or brand-new org
+account it is empty until billing data exists. The panel says so rather than showing
+a table of zeros.
+
+### Cortex and order forms
+
+**Order form extraction returns nothing, with no error.** The extraction runs inside
+`TSK_SF360_LANDING_AI`, so a Cortex failure surfaces as an empty `ORDERFORM.EXTRACTED`
+rather than a raised exception. Two causes:
+
+1. **Model not hosted in your region.** Cortex does not silently route cross-region.
+   Enable it explicitly — the line is in `setup.sql`, commented out, because it sends
+   inference payloads outside your region and that should be a deliberate choice:
+
+   ```sql
+   ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';
+   ```
+
+2. **Missing `SNOWFLAKE.CORTEX_USER`**, which `grants.sql` grants. Verify as
+   `SF360_APP_ROLE`:
+
+   ```sql
+   SELECT AI_COMPLETE('claude-4-sonnet', 'ok');
+   ```
+
+Either way, extraction is optional. Entering the contract by hand is the primary
+documented path and needs no Cortex at all.
+
+### Runtime
 
 **`Unsupported statement type 'ALTER_SESSION'`.** Streamlit in Snowflake runs inside a
 stored-procedure sandbox that rejects `ALTER SESSION`. The app probes for this once and
 falls back to carrying its query tag as a SQL comment. If you see it raised, the probe
 in `lib/sf.py` has been bypassed.
 
-**Task graph will not update.** `091421: root task is not suspended`. Suspend
-`TSK_SF360_ROOT` first, make the change, then resume.
+**`091421: root task is not suspended`.** A task graph cannot be modified while its
+root is running. Suspend `TSK_SF360_ROOT`, make the change, then resume it.
 
-**Verification checks fail after re-running setup.** Re-running recreates the LANDING
-tables empty, because they are derived and rebuilt nightly. `setup.sql` reloads them
-in Section 6, so a full re-run is fine — but if you ran only the DDL, call the four
-`SP_REBUILD_LANDING*` procedures and then `SP_REFRESH_CURATED` before judging the
-checks.
+### Teardown
+
+**`No active warehouse selected` at the end of teardown.** You are running an older
+copy. Section 4 drops `SF360_WH`, which is usually the session's warehouse, so the
+final confirmation cannot use compute — it is now four `SHOW` statements, which read
+metadata only. Pull the current `teardown.sql`.
+
+**Teardown run twice.** Safe. Every statement is `IF EXISTS`, and the `SHOW`
+confirmations return zero rows either way.
 
 ---
 
