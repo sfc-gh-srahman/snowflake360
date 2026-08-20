@@ -32,7 +32,10 @@
 
 USE DATABASE SF360;
 
-create or replace schema SF360.CURATED COMMENT='Curated dimensional and fact models over ACCOUNT_USAGE';
+-- IF NOT EXISTS rather than CREATE OR REPLACE, for the same reason as LANDING:
+-- replacing the schema drops everything in it wholesale, which makes the file's
+-- ordering irrelevant and its effect on a live install far larger than intended.
+CREATE SCHEMA IF NOT EXISTS SF360.CURATED COMMENT='Curated dimensional and fact models over ACCOUNT_USAGE';
 --
 -- Object order in this file is DEPENDENCY order, not the alphabetical order GET_DDL
 -- produced. Alphabetical put FCT_CONTRACT_POSITION (C) ahead of FCT_DAILY_CURRENCY

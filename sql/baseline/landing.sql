@@ -24,7 +24,12 @@
 
 USE DATABASE SF360;
 
-create or replace schema SF360.LANDING COMMENT='Sole consumer of SNOWFLAKE.ACCOUNT_USAGE. Task-driven CTAS; exists because dynamic tables cannot read shared secure views.';
+-- IF NOT EXISTS, not CREATE OR REPLACE. The six refresh tasks live in this schema,
+-- so replacing it drops the entire DAG -- and on a re-run that also discards the
+-- task history a customer would use to see whether refreshes have been succeeding.
+-- The tables inside are still individually CREATE OR REPLACE, which is correct:
+-- they are derived and rebuilt nightly.
+CREATE SCHEMA IF NOT EXISTS SF360.LANDING COMMENT='Sole consumer of SNOWFLAKE.ACCOUNT_USAGE. Task-driven CTAS; exists because dynamic tables cannot read shared secure views.';
 
 create or replace TRANSIENT TABLE SF360.LANDING.LND_ACCT_ANOMALIES (
 	ACCOUNT_NAME VARCHAR(16777216),

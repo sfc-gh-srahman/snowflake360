@@ -491,7 +491,7 @@ with tabs[1]:
                     SELECT {sql_str(num_in.strip())}, '{start_in}', '{end_in}',
                            {cap_in}, {free_in}, {roll_in}, {adj_in},
                            {bt_in}, {dsr_in}, {cca_in}, {bm_in},
-                           {sql_str(cur_in.strip() or 'USD')}, 'CUSTOMER_ENTERED',
+                           {sql_str(cur_in.strip().upper() or 'USD')}, 'CUSTOMER_ENTERED',
                            TRUE, CURRENT_DATE()"""
             )
             st.success(
@@ -513,7 +513,7 @@ with tabs[1]:
                       DATA_SHARING_REBATE = {dsr_in},
                       CURRENCY_CONVERSION_ADJUSTMENT = {cca_in},
                       BALANCE_MIGRATION = {bm_in},
-                      METERED_CURRENCY = {sql_str(cur_in.strip() or 'USD')},
+                      METERED_CURRENCY = {sql_str(cur_in.strip().upper() or 'USD')},
                       CONTRACT_SOURCE = 'CUSTOMER_ENTERED',
                       UPDATED_BY = CURRENT_USER(),
                       UPDATED_AT = CURRENT_TIMESTAMP()
