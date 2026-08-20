@@ -1096,9 +1096,9 @@ with tabs[4]:
 
     org_total = q(
         f"""SELECT COUNT(*) AS TOTAL,
-                   COUNT_IF(NOT IS_DELETED AND NOT IS_MOVED) AS LIVE,
-                   COUNT_IF(IS_IN_SCOPE) AS IN_SCOPE,
-                   COUNT_IF(IS_GOV_REGION) AS GOV
+                   COALESCE(COUNT_IF(NOT IS_DELETED AND NOT IS_MOVED), 0) AS LIVE,
+                   COALESCE(COUNT_IF(IS_IN_SCOPE), 0) AS IN_SCOPE,
+                   COALESCE(COUNT_IF(IS_GOV_REGION), 0) AS GOV
             FROM {DB}.CURATED.DIM_ACCOUNT""",
         PAGE,
         "org_account_counts",
@@ -1109,7 +1109,8 @@ with tabs[4]:
     m[1].metric("Live accounts", int(o["LIVE"]))
     m[2].metric("In scope", int(o["IN_SCOPE"]))
     m[3].metric("GOV region accounts", int(o["GOV"]),
-                "org usage unavailable", delta_color="off")
+                "org usage unavailable" if int(o["GOV"]) > 0 else None,
+                delta_color="off")
     st.caption(
         "ORGANIZATION_USAGE views are not available in US SnowGov regions, so accounts there "
         "under-report. Widening scope to the full organization needs a scale test first."
