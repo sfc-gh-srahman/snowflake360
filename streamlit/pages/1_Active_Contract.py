@@ -121,8 +121,10 @@ if not warns.empty:
     section("What to act on")
     for w in warns.itertuples():
         box = st.error if w.SEVERITY == "CRITICAL" else st.warning
+        # NaN is truthy, so `not NaN` is False and `NaN == 0` is False --
+        # both guards pass and int(NaN) raises. pd.isna catches it.
         when = (
-            "now" if not w.DAYS_UNTIL or w.DAYS_UNTIL == 0
+            "now" if pd.isna(w.DAYS_UNTIL) or not w.DAYS_UNTIL or w.DAYS_UNTIL == 0
             else f"in {int(w.DAYS_UNTIL)} days ({d(w.IMPACT_DATE)})"
         )
         box(f"**{w.WARNING_TITLE} - {when}**\n\n{w.MESSAGE}\n\n{w.RECOMMENDATION}")
