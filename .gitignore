@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.venv/
+output/
+
+# Parity fingerprints are machine-generated from whichever account you run against,
+# and they contain that account's real figures -- contract number, capacity amounts,
+# and every metric value rendered on every page. Regenerate them locally with
+# `python tests/parity.py capture --out tests/baseline`; do not commit them.
+tests/baseline/
+tests/baseline_pre_refactor/
+tests/after*/
+tests/final*/
+
+# Internal working documents. The A360 gap analysis compares this app against
+# Snowflake's internal Account 360 app, referencing internal screenshots, a customer
+# name and a Salesforce opportunity ID, none of which belong in a public repository.
+# The checkpoint is a development log. Both stay local.
+docs/a360-style-gap.md
+docs/checkpoint.md
+
+.DS_Store
+*.pdf

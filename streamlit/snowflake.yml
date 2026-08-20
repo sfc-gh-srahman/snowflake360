@@ -1,0 +1,35 @@
+definition_version: 2
+
+# Local / CLI deployment of the Streamlit app.
+#
+# This is the SECONDARY deployment path. The primary one is scripts/setup.sql,
+# which creates a GIT REPOSITORY object and runs
+#
+#   CREATE STREAMLIT ... FROM '@SF360.APP.SF360_REPO/branches/main/streamlit/'
+#
+# so Snowflake pulls the app from GitHub itself and the customer needs no local
+# tooling at all. Use this file when iterating on the app -- it uploads the working
+# copy straight to the stage, which is faster than commit, push, and re-fetch.
+#
+# Paths are relative to this file, and the app root is streamlit/ so that the
+# directory handed to CREATE STREAMLIT contains the entry script, pages/ and lib/
+# together. lib/ must sit inside it or "from lib.sf import ..." will not resolve
+# once Snowflake is running the app from the repository stage.
+
+entities:
+  snowflake360:
+    type: streamlit
+    identifier:
+      name: SNOWFLAKE360
+      schema: APP
+      database: SF360
+    stage: SF360.APP.STREAMLIT_STAGE
+    query_warehouse: SF360_WH
+    main_file: Snowflake360.py
+    title: "Snowflake360"
+    comment: "Customer-deployable org-wide cost attribution built on Snowflake-native cost intelligence."
+    artifacts:
+      - Snowflake360.py
+      - environment.yml
+      - lib/
+      - pages/
