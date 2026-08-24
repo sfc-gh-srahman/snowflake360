@@ -188,6 +188,13 @@ USE WAREHOUSE SF360_WH;
 -- on their own. Until they do, those pages explain that they are empty. Setting
 -- MODE = 'ACCOUNT' on a row count of zero would be wrong, and would leave the app
 -- permanently understating what the account can do.
+-- Wrapped in EXECUTE IMMEDIATE $$...$$ rather than written as a bare
+-- DECLARE ... END block, so this file survives being fed to a client that splits
+-- on semicolons -- `snow sql -f`, most JDBC batch runners, most CI steps. Those
+-- would otherwise send `DECLARE org_ok BOOLEAN DEFAULT FALSE;` on its own and fail
+-- with "syntax error ... unexpected '<EOF>'" here, taking sections 5 through 8 down
+-- with it. Snowsight's Run All handles either form; only this one handles both.
+EXECUTE IMMEDIATE $$
 DECLARE
   org_ok    BOOLEAN DEFAULT FALSE;
   org_rows  INTEGER DEFAULT 0;
@@ -218,7 +225,8 @@ BEGIN
                 IFF(org_rows > 0,
                     ' -- organization-wide reporting is available (' || org_rows || ' rows of org usage in the last 7 days).',
                     ' -- this IS an organization account, but ORGANIZATION_USAGE returned 0 rows for the last 7 days, so org-wide and currency pages will be empty for now. That is normal on a new organization account; Snowflake populates these views 24-48 hours after first use. Nothing to fix -- re-check tomorrow.'));
-END;
+END
+$$;
 
 /*******************************************************************************
  * SECTION 5 -- DEPLOY THE APP FROM GIT
