@@ -26,8 +26,8 @@ SELECT 2, 'G1b no join fanout currency to dim',
 UNION ALL
 -- G2/G3: edition label normalization must resolve a rate for every in-scope account
 SELECT 3, 'G2 all in-scope accounts have rates',
-       (SELECT COUNT_IF(PRICE_PER_PLATFORM_CREDIT IS NULL) FROM SF360.CONFIG.SUBSCRIPTION)::VARCHAR, '0',
-       IFF((SELECT COUNT_IF(PRICE_PER_PLATFORM_CREDIT IS NULL) FROM SF360.CONFIG.SUBSCRIPTION)=0,'PASS','FAIL')
+       (SELECT COALESCE(COUNT_IF(PRICE_PER_PLATFORM_CREDIT IS NULL), 0) FROM SF360.CONFIG.SUBSCRIPTION)::VARCHAR, '0',
+       IFF((SELECT COALESCE(COUNT_IF(PRICE_PER_PLATFORM_CREDIT IS NULL), 0) FROM SF360.CONFIG.SUBSCRIPTION)=0,'PASS','FAIL')
 UNION ALL
 -- G2b: different editions must resolve different platform rates
 SELECT 4, 'G2b editions resolve distinct rates',
@@ -36,9 +36,9 @@ SELECT 4, 'G2b editions resolve distinct rates',
 UNION ALL
 -- G4: adjustments must never be counted as consumption
 SELECT 5, 'G4 adjustments separated from usage',
-       (SELECT COUNT_IF(USAGE_IN_CURRENCY <> 0 AND ADJUSTMENT_IN_CURRENCY <> 0)
+       (SELECT COALESCE(COUNT_IF(USAGE_IN_CURRENCY <> 0 AND ADJUSTMENT_IN_CURRENCY <> 0), 0)
           FROM SF360.LANDING.LND_ORG_CURRENCY_DAILY)::VARCHAR, '0',
-       IFF((SELECT COUNT_IF(USAGE_IN_CURRENCY <> 0 AND ADJUSTMENT_IN_CURRENCY <> 0)
+       IFF((SELECT COALESCE(COUNT_IF(USAGE_IN_CURRENCY <> 0 AND ADJUSTMENT_IN_CURRENCY <> 0), 0)
               FROM SF360.LANDING.LND_ORG_CURRENCY_DAILY)=0,'PASS','FAIL')
 UNION ALL
 -- G6: totalling across currencies is meaningless
@@ -66,15 +66,15 @@ SELECT 8, 'CLS platform plus AI equals total',
 UNION ALL
 -- Forecast floor: no displayed bound may be negative
 SELECT 9, 'FC no negative forecast or bound',
-       (SELECT COUNT_IF(FORECASTED_VALUE < 0 OR LOWER_BOUND < 0)
+       (SELECT COALESCE(COUNT_IF(FORECASTED_VALUE < 0 OR LOWER_BOUND < 0), 0)
           FROM SF360.CURATED.FCT_ANOMALY_DAILY)::VARCHAR, '0',
-       IFF((SELECT COUNT_IF(FORECASTED_VALUE < 0 OR LOWER_BOUND < 0)
+       IFF((SELECT COALESCE(COUNT_IF(FORECASTED_VALUE < 0 OR LOWER_BOUND < 0), 0)
               FROM SF360.CURATED.FCT_ANOMALY_DAILY)=0,'PASS','FAIL')
 UNION ALL
 SELECT 10, 'FC no negative projection rate',
-       (SELECT COUNT_IF(PROJECTED_RATE_PER_DAY < 0 OR PROJECTED_OVERAGE < 0)
+       (SELECT COALESCE(COUNT_IF(PROJECTED_RATE_PER_DAY < 0 OR PROJECTED_OVERAGE < 0), 0)
           FROM SF360.CURATED.FCT_CONTRACT_PROJECTION)::VARCHAR, '0',
-       IFF((SELECT COUNT_IF(PROJECTED_RATE_PER_DAY < 0 OR PROJECTED_OVERAGE < 0)
+       IFF((SELECT COALESCE(COUNT_IF(PROJECTED_RATE_PER_DAY < 0 OR PROJECTED_OVERAGE < 0), 0)
               FROM SF360.CURATED.FCT_CONTRACT_PROJECTION)=0,'PASS','FAIL')
 UNION ALL
 -- G7: coverage gap - in-scope accounts with no usage must be counted, not read as zero
@@ -99,11 +99,11 @@ UNION ALL
 -- then reports FAIL for having moved rather than for being wrong. The row-count
 -- guard stops an empty DIM_DATE from passing vacuously with zero mismatches.
 SELECT 13, 'FY fiscal labels follow the Feb-1 fiscal rule',
-       (SELECT COUNT_IF(FISCAL_QUARTER_LABEL <> (CASE WHEN MONTH(DATE_UTC) >= 2 THEN YEAR(DATE_UTC) ELSE YEAR(DATE_UTC)-1 END) || '-Q' || (FLOOR(MOD(MONTH(DATE_UTC)-2+12,12)/3)+1))::VARCHAR
+       (SELECT COALESCE(COUNT_IF(FISCAL_QUARTER_LABEL <> (CASE WHEN MONTH(DATE_UTC) >= 2 THEN YEAR(DATE_UTC) ELSE YEAR(DATE_UTC)-1 END) || '-Q' || (FLOOR(MOD(MONTH(DATE_UTC)-2+12,12)/3)+1)), 0)::VARCHAR
           || ' mismatched of ' || COUNT(*)::VARCHAR || ' dates' FROM SF360.CURATED.DIM_DATE),
        '0 mismatched, at least 1 date',
        IFF((SELECT COUNT(*) FROM SF360.CURATED.DIM_DATE) > 0
-           AND COALESCE((SELECT COUNT_IF(FISCAL_QUARTER_LABEL <> (CASE WHEN MONTH(DATE_UTC) >= 2 THEN YEAR(DATE_UTC) ELSE YEAR(DATE_UTC)-1 END) || '-Q' || (FLOOR(MOD(MONTH(DATE_UTC)-2+12,12)/3)+1)) FROM SF360.CURATED.DIM_DATE), 1) = 0,
+           AND COALESCE((SELECT COALESCE(COUNT_IF(FISCAL_QUARTER_LABEL <> (CASE WHEN MONTH(DATE_UTC) >= 2 THEN YEAR(DATE_UTC) ELSE YEAR(DATE_UTC)-1 END) || '-Q' || (FLOOR(MOD(MONTH(DATE_UTC)-2+12,12)/3)+1)), 0) FROM SF360.CURATED.DIM_DATE), 1) = 0,
            'PASS','FAIL')
 UNION ALL
 -- BP1: period allocations must sum to the total capacity entitlement. If this
@@ -126,14 +126,31 @@ SELECT 15, 'BP2 periods contiguous',
             WHERE NXT IS NOT NULL AND NXT <> DATEADD(day,1,PERIOD_END))=0,'PASS','FAIL')
 UNION ALL
 -- BP3: period count must equal term months divided by the billing cadence.
+--
+-- This restates CONFIG.BILLING_SCHEDULE's rule instead of reading its output, so the
+-- two can be compared independently -- which means it has to restate the rule
+-- exactly, upfront case included: cadence NULL or 0 is one period spanning the term.
+-- Dividing by NULLIF(cadence,0) instead made the expected value NULL for an upfront
+-- contract, and NULL never equals the actual 1, so the check failed a pipeline that
+-- was right. A verification check that cannot represent a legitimate input is not
+-- protecting anything; it is manufacturing an alarm.
 SELECT 16, 'BP3 period count matches cadence',
        (SELECT MAX(PERIOD_COUNT)::VARCHAR FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION),
-       (SELECT TO_VARCHAR(CEIL(MAX(TERM_LENGTH_MONTHS)
-              / NULLIF(SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY)),0)))
+       (SELECT TO_VARCHAR(
+                 CASE WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY)) IS NULL
+                        OR SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY)) = 0
+                      THEN 1
+                      ELSE GREATEST(CEIL(MAX(TERM_LENGTH_MONTHS)
+                             / SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY))), 1)
+                 END)
           FROM SF360.CONFIG.CONTRACT WHERE IS_ACTIVE),
        IFF((SELECT MAX(PERIOD_COUNT) FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION)
-           = (SELECT CEIL(MAX(TERM_LENGTH_MONTHS)
-                / NULLIF(SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY)),0))
+           = (SELECT CASE WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY)) IS NULL
+                            OR SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY)) = 0
+                          THEN 1
+                          ELSE GREATEST(CEIL(MAX(TERM_LENGTH_MONTHS)
+                                 / SF360.ORDERFORM.FN_CADENCE_MONTHS(MAX(BILLING_FREQUENCY))), 1)
+                     END
               FROM SF360.CONFIG.CONTRACT WHERE IS_ACTIVE), 'PASS','FAIL')
 UNION ALL
 -- BP4: pooled remaining must reconcile to capacity minus cumulative consumption.
@@ -146,23 +163,23 @@ SELECT 17, 'BP4 pooled remaining reconciles',
 UNION ALL
 -- BP5: exactly one period may be current.
 SELECT 18, 'BP5 one current period',
-       (SELECT COUNT_IF(IS_CURRENT_PERIOD)::VARCHAR FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION), '1',
-       IFF((SELECT COUNT_IF(IS_CURRENT_PERIOD) FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION)=1,
+       (SELECT COALESCE(COUNT_IF(IS_CURRENT_PERIOD), 0)::VARCHAR FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION), '1',
+       IFF((SELECT COALESCE(COUNT_IF(IS_CURRENT_PERIOD), 0) FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION)=1,
            'PASS','WARN')
 UNION ALL
 -- BP6: a period outside usage retention must report NULL consumption, never 0,
 -- or the UI silently understates burn.
 SELECT 19, 'BP6 unmeasurable periods are null',
-       (SELECT COUNT_IF(DATA_COVERAGE='NO_DATA' AND CONSUMPTION IS NOT NULL)::VARCHAR
+       (SELECT COALESCE(COUNT_IF(DATA_COVERAGE='NO_DATA' AND CONSUMPTION IS NOT NULL), 0)::VARCHAR
           FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION), '0',
-       IFF((SELECT COUNT_IF(DATA_COVERAGE='NO_DATA' AND CONSUMPTION IS NOT NULL)
+       IFF((SELECT COALESCE(COUNT_IF(DATA_COVERAGE='NO_DATA' AND CONSUMPTION IS NOT NULL), 0)
               FROM SF360.CURATED.FCT_BILLING_PERIOD_POSITION)=0,'PASS','FAIL')
 UNION ALL
 -- TH1: every active warning must carry a days-until, or the UI cannot state how
 -- much lead time remains.
 SELECT 20, 'TH1 warnings have lead time',
-       (SELECT COUNT_IF(DAYS_UNTIL IS NULL)::VARCHAR FROM SF360.CURATED.FCT_CAPACITY_WARNING), '0',
-       IFF((SELECT COUNT_IF(DAYS_UNTIL IS NULL) FROM SF360.CURATED.FCT_CAPACITY_WARNING)=0,
+       (SELECT COALESCE(COUNT_IF(DAYS_UNTIL IS NULL), 0)::VARCHAR FROM SF360.CURATED.FCT_CAPACITY_WARNING), '0',
+       IFF((SELECT COALESCE(COUNT_IF(DAYS_UNTIL IS NULL), 0) FROM SF360.CURATED.FCT_CAPACITY_WARNING)=0,
            'PASS','FAIL')
 UNION ALL
 -- TH2: threshold evaluation must resolve to a known state for every threshold.
@@ -177,15 +194,15 @@ SELECT 21, 'TH2 thresholds all evaluated',
 UNION ALL
 -- OF1: an extracted contract must retain lineage back to the uploaded document.
 SELECT 22, 'OF1 extracted contract has provenance',
-       (SELECT COUNT_IF(CONTRACT_SOURCE='ORDER_FORM_EXTRACTED' AND SOURCE_UPLOAD_ID IS NULL)::VARCHAR
+       (SELECT COALESCE(COUNT_IF(CONTRACT_SOURCE='ORDER_FORM_EXTRACTED' AND SOURCE_UPLOAD_ID IS NULL), 0)::VARCHAR
           FROM SF360.CONFIG.CONTRACT), '0',
-       IFF((SELECT COUNT_IF(CONTRACT_SOURCE='ORDER_FORM_EXTRACTED' AND SOURCE_UPLOAD_ID IS NULL)
+       IFF((SELECT COALESCE(COUNT_IF(CONTRACT_SOURCE='ORDER_FORM_EXTRACTED' AND SOURCE_UPLOAD_ID IS NULL), 0)
               FROM SF360.CONFIG.CONTRACT)=0,'PASS','FAIL')
 UNION ALL
 -- OF2: the derived On Demand price must be at or above the contract price. A
 -- lower value would understate the exhaustion price cliff.
 SELECT 23, 'OF2 on demand price >= contract price',
-       (SELECT COUNT_IF(ON_DEMAND_CREDIT_PRICE < CAPACITY_CREDIT_PRICE)::VARCHAR
+       (SELECT COALESCE(COUNT_IF(ON_DEMAND_CREDIT_PRICE < CAPACITY_CREDIT_PRICE), 0)::VARCHAR
           FROM SF360.CONFIG.CONTRACT WHERE IS_ACTIVE), '0',
-       IFF((SELECT COUNT_IF(ON_DEMAND_CREDIT_PRICE < CAPACITY_CREDIT_PRICE)
+       IFF((SELECT COALESCE(COUNT_IF(ON_DEMAND_CREDIT_PRICE < CAPACITY_CREDIT_PRICE), 0)
               FROM SF360.CONFIG.CONTRACT WHERE IS_ACTIVE)=0,'PASS','FAIL');

@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS SF360.ORDERFORM.RAW_UPLOAD (
 CREATE OR REPLACE FUNCTION SF360.ORDERFORM.FN_CADENCE_MONTHS("P_FREQ" VARCHAR)
 RETURNS NUMBER(38,0)
 LANGUAGE SQL
-COMMENT='Map an order form billing frequency to a period length in months. Returns NULL for anything unrecognized so callers can flag it rather than silently assuming a cadence.'
+COMMENT='Map an order form billing frequency to a period length in months. Two distinct non-positive answers, and callers MUST tell them apart: 0 means upfront -- one payment covering the whole term, a real and common answer, especially on AWS Marketplace order forms. NULL means unrecognized. Neither may be used as a divisor: 0 raises Division by zero, and guarding with NULLIF only converts that into a NULL that compares false and reports a spurious failure. Branch on 0 explicitly and treat it as a single period spanning the term, which is what CONFIG.BILLING_SCHEDULE does.'
 AS '
   CASE
     WHEN P_FREQ IS NULL THEN NULL
@@ -240,13 +240,25 @@ BEGIN
   -- (c) Billing frequency must be a cadence we can turn into periods.
   --     This is the field that failed extraction testing, so it gets an
   --     explicit callout rather than a generic pass.
+  --
+  --     Three outcomes, not two. Upfront (0) is a recognized, correct cadence and
+  --     must not be told to double-check the column it read: an AWS Marketplace form
+  --     legitimately says "Upfront and as provided below" under Capacity Fees, and
+  --     advising the reader to go look for a recurring cadence sends them hunting
+  --     for something that is not on the page.
   UPDATE SF360.ORDERFORM.EXTRACTED
-     SET CHECK_STATUS = IFF(SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL,
-                            ''FAIL'', ''WARN''),
-         CHECK_DETAIL = IFF(SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL,
-              ''Unrecognized cadence. Expected Monthly, Quarterly, Semi-Annually or Annually.'',
-              ''Confirm this is the Capacity Fees column, not On Demand Fees. ''
-           || ''These sit side by side in the same table row and are easily swapped.'')
+     SET CHECK_STATUS = CASE
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL THEN ''FAIL''
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) = 0    THEN ''PASS''
+           ELSE ''WARN'' END,
+         CHECK_DETAIL = CASE
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL
+             THEN ''Unrecognized cadence. Expected Monthly, Quarterly, Semi-Annually, Annually, or an upfront/paid-in-advance term.''
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) = 0
+             THEN ''Billed upfront: the capacity is paid once and covers the full term, so there is no recurring installment schedule. Common on AWS Marketplace order forms.''
+           ELSE ''Confirm this is the Capacity Fees column, not On Demand Fees. ''
+             || ''These sit side by side in the same table row and are easily swapped.''
+           END
    WHERE UPLOAD_ID = :P_UPLOAD_ID
      AND FIELD_NAME = ''capacity_billing_frequency''
      AND NORMALIZED_VALUE IS NOT NULL;
@@ -300,6 +312,15 @@ BEGIN
 
   -- (e) Term length must divide evenly into the billing cadence, otherwise the
   --     installment schedule has a ragged final period.
+  --
+  --     CAD = 0 is upfront billing, not a missing value, and it is not a divisor.
+  --     It gets its own arm before any arithmetic touches it: MOD(MONTHS, 0) raises
+  --     Division by zero, which is what took this whole procedure down on an AWS
+  --     Marketplace order form ("Billing Frequency: Upfront and as provided below").
+  --     The answer for upfront is one installment covering the term, matching
+  --     CONFIG.BILLING_SCHEDULE. CASE short-circuits, so the later arms are never
+  --     evaluated when CAD is 0; MOD still carries a NULLIF in case a future plan
+  --     evaluates more eagerly than the current one.
   UPDATE SF360.ORDERFORM.EXTRACTED e
      SET CHECK_STATUS = v.STATUS,
          CHECK_DETAIL = v.DETAIL
@@ -318,15 +339,21 @@ BEGIN
       )
       SELECT ''term_length_months'' AS FIELD_NAME,
         CASE WHEN MONTHS IS NULL OR CAD IS NULL THEN ''WARN''
-             WHEN MOD(MONTHS, CAD) = 0 THEN ''PASS''
+             WHEN CAD = 0 THEN ''PASS''
+             WHEN MOD(MONTHS, NULLIF(CAD,0)) = 0 THEN ''PASS''
              ELSE ''WARN'' END AS STATUS,
         CASE
           WHEN MONTHS IS NULL OR CAD IS NULL THEN ''Could not verify term against billing cadence.''
-          WHEN MOD(MONTHS, CAD) = 0
+          WHEN CAD = 0
+            THEN ''Paid upfront: a single installment of ''
+                 || TRIM(TO_VARCHAR(CAP, ''999,999,999.00''))
+                 || '' covering the whole '' || MONTHS
+                 || ''-month term. There are no recurring installments to reconcile.''
+          WHEN MOD(MONTHS, NULLIF(CAD,0)) = 0
             THEN MONTHS || '' months / '' || CAD || ''-month cadence = ''
-                 || TO_VARCHAR(FLOOR(MONTHS/CAD))
+                 || TO_VARCHAR(FLOOR(MONTHS/NULLIF(CAD,0)))
                  || '' installments of ''
-                 || TRIM(TO_VARCHAR(CAP / FLOOR(MONTHS/CAD), ''999,999,999.00'')) || ''.''
+                 || TRIM(TO_VARCHAR(CAP / NULLIF(FLOOR(MONTHS/NULLIF(CAD,0)),0), ''999,999,999.00'')) || ''.''
           ELSE MONTHS || '' months does not divide evenly by a '' || CAD
                || ''-month cadence; the final installment will be a partial period.''
         END AS DETAIL

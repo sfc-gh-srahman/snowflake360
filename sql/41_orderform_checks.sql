@@ -45,13 +45,25 @@ BEGIN
   -- (c) Billing frequency must be a cadence we can turn into periods.
   --     This is the field that failed extraction testing, so it gets an
   --     explicit callout rather than a generic pass.
+  --
+  --     Three outcomes, not two. FN_CADENCE_MONTHS returns 0 for upfront billing,
+  --     which is a recognized and correct cadence -- an AWS Marketplace order form
+  --     says "Upfront and as provided below" under Capacity Fees. Telling that reader
+  --     to double-check they read the right column sends them looking for a recurring
+  --     cadence that is not on the page.
   UPDATE SF360.ORDERFORM.EXTRACTED
-     SET CHECK_STATUS = IFF(SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL,
-                            'FAIL', 'WARN'),
-         CHECK_DETAIL = IFF(SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL,
-              'Unrecognized cadence. Expected Monthly, Quarterly, Semi-Annually or Annually.',
-              'Confirm this is the Capacity Fees column, not On Demand Fees. '
-           || 'These sit side by side in the same table row and are easily swapped.')
+     SET CHECK_STATUS = CASE
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL THEN 'FAIL'
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) = 0    THEN 'PASS'
+           ELSE 'WARN' END,
+         CHECK_DETAIL = CASE
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) IS NULL
+             THEN 'Unrecognized cadence. Expected Monthly, Quarterly, Semi-Annually, Annually, or an upfront/paid-in-advance term.'
+           WHEN SF360.ORDERFORM.FN_CADENCE_MONTHS(NORMALIZED_VALUE) = 0
+             THEN 'Billed upfront: the capacity is paid once and covers the full term, so there is no recurring installment schedule. Common on AWS Marketplace order forms.'
+           ELSE 'Confirm this is the Capacity Fees column, not On Demand Fees. '
+             || 'These sit side by side in the same table row and are easily swapped.'
+           END
    WHERE UPLOAD_ID = :P_UPLOAD_ID
      AND FIELD_NAME = 'capacity_billing_frequency'
      AND NORMALIZED_VALUE IS NOT NULL;
@@ -105,6 +117,14 @@ BEGIN
 
   -- (e) Term length must divide evenly into the billing cadence, otherwise the
   --     installment schedule has a ragged final period.
+  --
+  --     CAD = 0 is upfront billing, not a missing value, and it is not a divisor.
+  --     It needs its own arm ahead of any arithmetic: MOD(MONTHS, 0) raises Division
+  --     by zero, which took the whole extraction down on an AWS Marketplace order
+  --     form. Guarding with NULLIF alone is not enough either -- that yields NULL,
+  --     which compares false and reports a spurious WARN on a correct contract. The
+  --     right answer for upfront is one installment spanning the term, which is what
+  --     CONFIG.BILLING_SCHEDULE already computes.
   UPDATE SF360.ORDERFORM.EXTRACTED e
      SET CHECK_STATUS = v.STATUS,
          CHECK_DETAIL = v.DETAIL
@@ -123,15 +143,21 @@ BEGIN
       )
       SELECT 'term_length_months' AS FIELD_NAME,
         CASE WHEN MONTHS IS NULL OR CAD IS NULL THEN 'WARN'
-             WHEN MOD(MONTHS, CAD) = 0 THEN 'PASS'
+             WHEN CAD = 0 THEN 'PASS'
+             WHEN MOD(MONTHS, NULLIF(CAD,0)) = 0 THEN 'PASS'
              ELSE 'WARN' END AS STATUS,
         CASE
           WHEN MONTHS IS NULL OR CAD IS NULL THEN 'Could not verify term against billing cadence.'
-          WHEN MOD(MONTHS, CAD) = 0
+          WHEN CAD = 0
+            THEN 'Paid upfront: a single installment of '
+                 || TRIM(TO_VARCHAR(CAP, '999,999,999.00'))
+                 || ' covering the whole ' || MONTHS
+                 || '-month term. There are no recurring installments to reconcile.'
+          WHEN MOD(MONTHS, NULLIF(CAD,0)) = 0
             THEN MONTHS || ' months / ' || CAD || '-month cadence = '
-                 || TO_VARCHAR(FLOOR(MONTHS/CAD))
+                 || TO_VARCHAR(FLOOR(MONTHS/NULLIF(CAD,0)))
                  || ' installments of '
-                 || TRIM(TO_VARCHAR(CAP / FLOOR(MONTHS/CAD), '999,999,999.00')) || '.'
+                 || TRIM(TO_VARCHAR(CAP / NULLIF(FLOOR(MONTHS/NULLIF(CAD,0)),0), '999,999,999.00')) || '.'
           ELSE MONTHS || ' months does not divide evenly by a ' || CAD
                || '-month cadence; the final installment will be a partial period.'
         END AS DETAIL
