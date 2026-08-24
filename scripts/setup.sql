@@ -188,12 +188,17 @@ USE WAREHOUSE SF360_WH;
 -- on their own. Until they do, those pages explain that they are empty. Setting
 -- MODE = 'ACCOUNT' on a row count of zero would be wrong, and would leave the app
 -- permanently understating what the account can do.
--- Wrapped in EXECUTE IMMEDIATE $$...$$ rather than written as a bare
--- DECLARE ... END block, so this file survives being fed to a client that splits
--- on semicolons -- `snow sql -f`, most JDBC batch runners, most CI steps. Those
--- would otherwise send `DECLARE org_ok BOOLEAN DEFAULT FALSE;` on its own and fail
--- with "syntax error ... unexpected '<EOF>'" here, taking sections 5 through 8 down
--- with it. Snowsight's Run All handles either form; only this one handles both.
+-- Wrapped in EXECUTE IMMEDIATE with a dollar-quoted body rather than written as a
+-- bare DECLARE ... END block, so this file survives being fed to a client that
+-- splits on semicolons -- `snow sql -f`, most JDBC batch runners, most CI steps.
+-- Those would otherwise send `DECLARE org_ok BOOLEAN DEFAULT FALSE;` on its own
+-- and fail with "syntax error ... unexpected '<EOF>'" here, taking sections 5
+-- through 8 down with it. Snowsight's Run All handles either form; only this one
+-- handles both.
+--
+-- Deliberately no dollar-quote delimiters in this comment: they are what a naive
+-- splitter tracks to find statement boundaries, and a stray pair in a comment is
+-- ambiguity for no gain in exactly the file that most needs none.
 EXECUTE IMMEDIATE $$
 DECLARE
   org_ok    BOOLEAN DEFAULT FALSE;
