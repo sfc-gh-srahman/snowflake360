@@ -373,12 +373,21 @@ snowflake360/
     40..49_*.sql           development-order files, source of truth for WHY
   tests/                   verification, SiS harness, parity harness
   tools/audit_grants.py    least-privilege check
-  docs/                    architecture notes and the guide narrative
+  docs/
+    engineering-notes.md   why the code looks like this, and the bugs that shaped it
+    guide-narrative.md     long-form walkthrough
 ```
 
 `sql/baseline/` holds the deployable definitions; the numbered `sql/` files hold the
 reasoning, because `GET_DDL` strips comments. When they disagree about intent, the
 numbered file is the record of why.
+
+Before changing anything non-trivial, read
+[`docs/engineering-notes.md`](docs/engineering-notes.md). It documents the traps that
+are not visible from the code: why `COUNT_IF` cannot be trusted on a possibly-empty
+table, why a zero billing cadence needs a branch rather than `DIV0`, why baseline files
+scripted with `GET_DDL` have never run from zero, and why code lives in three places
+rather than two.
 
 ---
 
