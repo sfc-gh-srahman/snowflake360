@@ -64,6 +64,17 @@ BEGIN
   -- 2. Extract, then normalize per declared data type. RAW_VALUE is kept
   --    verbatim so the review UI can show what the model actually said next to
   --    the cleaned value.
+  --
+  --    DELETE and INSERT are one transaction, not two statements. Autocommit made
+  --    this idempotent only for *sequential* re-runs: two overlapping calls both
+  --    deleted while the table was still empty, then both inserted, doubling every
+  --    field. A double-clicked "Upload and extract" was enough to do it, and the
+  --    damage stayed invisible until activation failed on OBJECT_AGG much later.
+  --    Inside a transaction the second caller blocks on the first DELETE row lock
+  --    until it commits, so the loser cleanly replaces the winner instead of
+  --    stacking on top of it. Exactly one set of rows survives either ordering.
+  BEGIN TRANSACTION;
+
   DELETE FROM SF360.ORDERFORM.EXTRACTED WHERE UPLOAD_ID = :P_UPLOAD_ID;
 
   INSERT INTO SF360.ORDERFORM.EXTRACTED
@@ -117,6 +128,8 @@ BEGIN
     END
   FROM SF360.ORDERFORM.FIELD_SPEC s
   LEFT JOIN flat fl ON fl.FIELD_NAME = s.FIELD_NAME;
+
+  COMMIT;
 
   SELECT COUNT(*) INTO :V_FIELDS
   FROM SF360.ORDERFORM.EXTRACTED WHERE UPLOAD_ID = :P_UPLOAD_ID;

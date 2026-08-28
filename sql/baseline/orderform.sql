@@ -115,11 +115,25 @@ BEGIN
     RETURN ''BLOCKED: '' || :V_FAILS || '' required field(s) still empty. Fill them in review first.'';
   END IF;
 
+  -- One row per field, even if EXTRACTED somehow holds more than one.
+  --
+  -- OBJECT_AGG raises "Duplicate field key" on a repeated key. That surfaced in the
+  -- UI as an opaque EXPRESSION_ERROR naming a line number inside this procedure,
+  -- at the *end* of a long manual review -- the worst place to lose the work, and
+  -- unactionable for whoever hits it. Extraction is transactional now, so the
+  -- duplicates that caused it cannot recur, but activation refuses to be the step
+  -- that breaks if one ever appears again: most recently extracted row wins.
   LET V_VALS OBJECT := (
-    SELECT OBJECT_AGG(FIELD_NAME, COALESCE(REVIEWED_VALUE, NORMALIZED_VALUE)::VARIANT)
-    FROM SF360.ORDERFORM.EXTRACTED
-    WHERE UPLOAD_ID = :P_UPLOAD_ID
-      AND COALESCE(REVIEWED_VALUE, NORMALIZED_VALUE) IS NOT NULL
+    SELECT OBJECT_AGG(FIELD_NAME, VAL)
+    FROM (
+      SELECT FIELD_NAME,
+             COALESCE(REVIEWED_VALUE, NORMALIZED_VALUE)::VARIANT AS VAL
+      FROM SF360.ORDERFORM.EXTRACTED
+      WHERE UPLOAD_ID = :P_UPLOAD_ID
+        AND COALESCE(REVIEWED_VALUE, NORMALIZED_VALUE) IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY FIELD_NAME
+                                 ORDER BY EXTRACTED_AT DESC) = 1
+    )
   );
 
   V_NUM := :V_VALS:order_form_number::VARCHAR;
@@ -198,6 +212,22 @@ BEGIN
 
   SELECT COUNT(*) INTO :V_PERIODS
   FROM SF360.CONFIG.BILLING_SCHEDULE WHERE CONTRACT_SK = :V_SK;
+
+  -- Rebuild the curated layer before returning.
+  --
+  -- Every contract-keyed fact joins the term to DIM_DATE, so until curated is
+  -- rebuilt none of them contain the contract that was just activated. The app
+  -- reported that as "No contract position rows. The active contract term may not
+  -- overlap available usage." -- a message describing a date-range problem, on an
+  -- install whose term overlapped usage by two years. Activation appeared to
+  -- succeed and the page was empty, which reads as the product being broken.
+  --
+  -- Clearing the Streamlit cache cannot fix this: the staleness is in the dynamic
+  -- tables, not the client. It belongs here rather than in the UI so that any
+  -- caller -- app, worksheet, task -- leaves the account in a consistent state.
+  -- Activation is rare and deliberate, so paying the refresh cost inline is the
+  -- right trade against shipping a page that looks broken.
+  CALL SF360.CURATED.SP_REFRESH_CURATED();
 
   RETURN ''OK: contract '' || :V_NUM || '' active with '' || :V_PERIODS || '' billing periods'';
 END;
@@ -444,6 +474,17 @@ BEGIN
   -- 2. Extract, then normalize per declared data type. RAW_VALUE is kept
   --    verbatim so the review UI can show what the model actually said next to
   --    the cleaned value.
+  --
+  --    DELETE and INSERT are one transaction, not two statements. Autocommit made
+  --    this idempotent only for *sequential* re-runs: two overlapping calls both
+  --    deleted while the table was still empty, then both inserted, doubling every
+  --    field. A double-clicked "Upload and extract" was enough to do it, and the
+  --    damage stayed invisible until activation failed on OBJECT_AGG much later.
+  --    Inside a transaction the second caller blocks on the first DELETE row lock
+  --    until it commits, so the loser cleanly replaces the winner instead of
+  --    stacking on top of it. Exactly one set of rows survives either ordering.
+  BEGIN TRANSACTION;
+
   DELETE FROM SF360.ORDERFORM.EXTRACTED WHERE UPLOAD_ID = :P_UPLOAD_ID;
 
   INSERT INTO SF360.ORDERFORM.EXTRACTED
@@ -497,6 +538,8 @@ BEGIN
     END
   FROM SF360.ORDERFORM.FIELD_SPEC s
   LEFT JOIN flat fl ON fl.FIELD_NAME = s.FIELD_NAME;
+
+  COMMIT;
 
   SELECT COUNT(*) INTO :V_FIELDS
   FROM SF360.ORDERFORM.EXTRACTED WHERE UPLOAD_ID = :P_UPLOAD_ID;

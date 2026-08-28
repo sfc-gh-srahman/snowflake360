@@ -127,6 +127,11 @@ Either:
   capacity fees and On Demand fees sit in adjacent columns of the same table, and
   reading the wrong one changes the entire installment schedule.
 
+Saving a contract by either route rebuilds the curated layer before returning, so Active
+Contract reflects it immediately instead of waiting for the next scheduled refresh. The same
+applies to saving rates or alert thresholds. Those saves therefore take tens of seconds rather
+than being instant, and show a spinner while they run.
+
 ### Step 3 — read your position
 
 **Active Contract** is the day-to-day page. It leads with what to act on: capacity

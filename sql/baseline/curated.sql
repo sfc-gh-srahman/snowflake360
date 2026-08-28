@@ -206,15 +206,35 @@ create or replace dynamic table SF360.CURATED.DIM_DATE(
 	BUILT_AT
 ) target_lag = '1 day' refresh_mode = FULL initialize = ON_CREATE warehouse = SF360_WH
  as
+-- Bounds span whichever of usage and contract term is known, and tolerate either
+-- being absent.
+--
+-- This was LEAST/GREATEST over the two subqueries, which returns NULL if *any*
+-- argument is NULL. setup.sql always runs with CONFIG.CONTRACT empty, so D0 came
+-- out NULL on every cold install, DATEADD produced NULL dates, the LIMIT filter
+-- matched nothing, and the date dimension built empty. Everything keyed to a date
+-- then silently returned no rows -- FCT_CONTRACT_POSITION included, which is what
+-- put "the active contract term may not overlap available usage" on the Active
+-- Contract page while the term in fact overlapped by two years.
+--
+-- Aggregate MIN/MAX skip NULLs instead of propagating them, so an empty side is
+-- simply ignored. The dimension is now empty only when both sources genuinely are,
+-- which is the one case where empty is the right answer.
+--
+-- Deliberately NOT the GREATEST(x, 0) idiom used elsewhere in this file: those
+-- floor a value against a literal and propagate NULL on purpose, because an
+-- unmeasurable period must stay NULL rather than read as zero (CHK 19 asserts it).
 WITH bounds AS (
-  SELECT LEAST(
-           (SELECT MIN(USAGE_DATE_UTC) FROM SF360.LANDING.LND_METERING_DAILY),
-           (SELECT MIN(CONTRACT_START_DATE) FROM SF360.CONFIG.CONTRACT)
-         ) AS D0,
-         GREATEST(
-           (SELECT MAX(USAGE_DATE_UTC) FROM SF360.LANDING.LND_METERING_DAILY),
-           (SELECT MAX(CONTRACT_END_DATE) FROM SF360.CONFIG.CONTRACT)
-         ) AS D1
+  SELECT MIN(D) AS D0, MAX(D) AS D1
+  FROM (
+    SELECT MIN(USAGE_DATE_UTC)     AS D FROM SF360.LANDING.LND_METERING_DAILY
+    UNION ALL
+    SELECT MAX(USAGE_DATE_UTC)     AS D FROM SF360.LANDING.LND_METERING_DAILY
+    UNION ALL
+    SELECT MIN(CONTRACT_START_DATE) AS D FROM SF360.CONFIG.CONTRACT
+    UNION ALL
+    SELECT MAX(CONTRACT_END_DATE)   AS D FROM SF360.CONFIG.CONTRACT
+  )
 ),
 gen AS (
   SELECT DATEADD('day', SEQ4(), (SELECT D0 FROM bounds)) AS DATE_UTC

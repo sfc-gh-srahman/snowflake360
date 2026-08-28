@@ -65,6 +65,24 @@ def exec_write(sql: str) -> None:
     st.cache_data.clear()
 
 
+def rebuild_curated() -> None:
+    """Rebuild CURATED after changing config it derives from.
+
+    Everything in CURATED is a dynamic table, and it reads CONTRACT, BILLING_SCHEDULE,
+    SUBSCRIPTION, ACCOUNT_SCOPE and ALERT_THRESHOLDS. Saving any of those without
+    rebuilding leaves the pages showing pre-save numbers until the target lag expires,
+    so a save reports success and visibly changes nothing.
+
+    Clearing the Streamlit cache is not sufficient and never was: the staleness is in
+    the dynamic tables, so a cleared cache just re-reads the same stale rows.
+
+    Call this once per save, after any loop -- not inside it, or an N-row save pays for
+    N rebuilds.
+    """
+    with st.spinner("Rebuilding curated layer..."):
+        exec_write(f"CALL {DB}.CURATED.SP_REFRESH_CURATED()")
+
+
 tabs = st.tabs(
     ["Order form", "Contract", "Billing & thresholds", "Rates", "Account scope",
      "Refresh & alerts"]
@@ -329,10 +347,13 @@ with tabs[0]:
             )
             if st.button("Accept and activate", type="primary", disabled=bool(n_fail)):
                 try:
-                    rows = sf.exec_sql(
-                        f"CALL {DB}.ORDERFORM.SP_ACCEPT_ORDER_FORM({sf.sql_str(choice)})",
-                        page=PAGE, query_name="accept_order_form",
-                    )
+                    # Activation rebuilds the curated layer, so it takes tens of
+                    # seconds rather than being instant. Say so, or it reads as hung.
+                    with st.spinner("Activating contract and rebuilding curated layer..."):
+                        rows = sf.exec_sql(
+                            f"CALL {DB}.ORDERFORM.SP_ACCEPT_ORDER_FORM({sf.sql_str(choice)})",
+                            page=PAGE, query_name="accept_order_form",
+                        )
                     msg = rows[0][0] if rows else ""
                     if str(msg).startswith("BLOCKED"):
                         st.error(msg)
@@ -494,9 +515,9 @@ with tabs[1]:
                            {sql_str(cur_in.strip().upper() or 'USD')}, 'CUSTOMER_ENTERED',
                            TRUE, CURRENT_DATE()"""
             )
+            rebuild_curated()
             st.success(
-                "Contract created. Enter your negotiated rates on the **Rates** tab, then "
-                "run the refresh from **Refresh & alerts** so projections pick it up."
+                "Contract created. Enter your negotiated rates on the **Rates** tab."
             )
             st.rerun()
         else:
@@ -519,10 +540,8 @@ with tabs[1]:
                       UPDATED_AT = CURRENT_TIMESTAMP()
                     WHERE CONTRACT_SK = {int(a['CONTRACT_SK'])}"""
             )
-            st.success(
-                "Contract saved. Run the refresh task or wait for the 11:00 UTC run for "
-                "projections to pick it up."
-            )
+            rebuild_curated()
+            st.success("Contract saved. Projections reflect it now.")
             st.rerun()
 
     # -----------------------------------------------------------------------
@@ -697,6 +716,7 @@ with tabs[1]:
                         f"{usd(price_in)} at a {disc_in:g}% discount. That gap is the "
                         "price increase that applies once capacity is exhausted."
                     )
+                rebuild_curated()
                 st.success("Commercial terms saved. The installment schedule now reflects them.")
                 st.rerun()
 
@@ -805,6 +825,7 @@ with tabs[2]:
                                UPDATED_BY = CURRENT_USER()
                          WHERE IS_ACTIVE"""
                 )
+                rebuild_curated()
                 st.success("Saved. Billing positions recalculated.")
                 st.rerun()
 
@@ -871,6 +892,7 @@ with tabs[2]:
                             {sql_str(label)}, '{sev}', {email}, TRUE)"""
             )
         if added:
+            rebuild_curated()
             st.success(f"Added {added} {scope.lower()} threshold(s) at 25/50/75/100%.")
             st.rerun()
         else:
@@ -917,6 +939,7 @@ with tabs[2]:
                             '{r.SEVERITY if pd.notna(r.SEVERITY) else 'WARNING'}',
                             {bool(r.NOTIFY_EMAIL)}, {bool(r.IS_ENABLED)})"""
             )
+        rebuild_curated()
         st.success(f"Saved {len(rows)} threshold(s).")
         st.rerun()
 
@@ -1069,6 +1092,7 @@ with tabs[3]:
                           UPDATED_BY = CURRENT_USER(), UPDATED_AT = CURRENT_TIMESTAMP()
                         WHERE SUBSCRIPTION_ID = {int(r['SUBSCRIPTION_ID'])}"""
                 )
+            rebuild_curated()
             st.success("Rates saved and marked CUSTOMER_ENTERED.")
             st.rerun()
 

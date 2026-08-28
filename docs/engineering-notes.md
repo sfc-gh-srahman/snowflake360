@@ -72,6 +72,42 @@ if not value or value == 0:     # NaN passes straight through:
 Use `pd.isna(value)` explicitly, before any `int()` or comparison. Two sites had this;
 both are now `pd.isna(...) or not ... or ... == 0`.
 
+### 1c. `LEAST` and `GREATEST` return NULL if *any* argument is NULL
+
+They are not NULL-skipping minimum and maximum. The aggregates `MIN` and `MAX` skip NULLs;
+the scalar functions propagate them. That difference silently emptied the entire date
+dimension.
+
+`CURATED.DIM_DATE` derived its bounds from usage and the contract term:
+
+```sql
+LEAST( (SELECT MIN(USAGE_DATE_UTC) FROM ...LND_METERING_DAILY),
+       (SELECT MIN(CONTRACT_START_DATE) FROM ...CONFIG.CONTRACT) )  -- NULL if either is
+```
+
+`setup.sql` always runs with `CONFIG.CONTRACT` empty, so the second argument was **always**
+NULL on a cold install. `D0` became NULL, `DATEADD` over the generator produced NULL dates,
+the `<= D1` filter matched nothing, and `DIM_DATE` built with zero rows. Every contract-keyed
+fact joins it, so they were all empty too.
+
+Use an aggregate over the candidates instead, which ignores the absent side:
+
+```sql
+SELECT MIN(D) AS D0, MAX(D) AS D1
+FROM (         SELECT MIN(USAGE_DATE_UTC)      AS D FROM ...LND_METERING_DAILY
+     UNION ALL SELECT MAX(USAGE_DATE_UTC)         FROM ...LND_METERING_DAILY
+     UNION ALL SELECT MIN(CONTRACT_START_DATE)    FROM ...CONFIG.CONTRACT
+     UNION ALL SELECT MAX(CONTRACT_END_DATE)      FROM ...CONFIG.CONTRACT )
+```
+
+Now empty only when *both* sources are, which is the one case where empty is correct.
+
+**Do not "fix" the `GREATEST(x, 0)` floors elsewhere in `curated.sql` the same way.** Those
+propagate NULL deliberately, per §1: an unmeasurable period must stay NULL rather than read as
+zero, and `CHK 19` asserts it. The distinguishing question is whether the other argument is a
+literal (intentional) or another possibly-empty aggregate (a bug). A sweep for the construct
+found exactly one site of the latter, which is the point of §5's "grep for the construct."
+
 ---
 
 ## 2. Magic sentinels need semantic branches, not arithmetic guards
@@ -339,3 +375,59 @@ numbered `sql/40..49_*.sql` files hold the reasoning, because `GET_DDL` strips c
 **They must be fixed together.** The numbered files are documented as the record of *why*;
 if they disagree with `baseline/` about intent, the record is actively misleading. Every
 fix in this document was applied to both.
+
+---
+
+## 9. Write paths: idempotent on retry is not idempotent under concurrency
+
+### 9a. `DELETE` then `INSERT` needs a transaction
+
+`SP_EXTRACT_ORDER_FORM` deleted an upload's rows before re-inserting them, and its comment
+claimed idempotence. That was true for *sequential* re-runs and false for overlapping ones.
+Under autocommit each statement commits on its own, so two concurrent calls interleave as:
+
+```
+session A: DELETE (0 rows)      session B: DELETE (0 rows)
+session A: INSERT (18 rows)     session B: INSERT (18 rows)   -> 36 rows, every field doubled
+```
+
+A double-clicked button is enough to produce it. Wrapping `DELETE` + `INSERT` in one
+transaction fixes it: the second caller blocks on the first's row lock until it commits, then
+deletes those rows and inserts its own, so exactly one set survives either ordering.
+
+**The failure shape is the real lesson.** Nothing failed at write time. The corruption sat
+inert until `SP_ACCEPT_ORDER_FORM` aggregated the table with `OBJECT_AGG`, which raises
+`Duplicate field key` on a repeated key — surfacing as an opaque `EXPRESSION_ERROR` citing a
+line number inside a procedure, at the end of a long manual review, in a completely different
+part of the app from the bug. Prefer enforcing a write invariant at the write, and make
+readers of user-editable tables defensive anyway: the accept path now dedupes with
+`QUALIFY ROW_NUMBER()` so a stray duplicate can degrade the result but never abort the work.
+
+### 9b. Whatever changes a derived layer's inputs must rebuild it
+
+`SP_ACCEPT_ORDER_FORM` wrote `CONFIG.CONTRACT` and returned. Every contract-keyed fact in
+`CURATED` is a dynamic table joining that term to `DIM_DATE`, so until curated was rebuilt
+none of them contained the contract just activated. Activation reported success and the Active
+Contract page was empty — for up to a day, until the scheduled refresh caught up.
+
+Two things this is not:
+
+- **Not a caching problem.** `st.cache_data.clear()` cannot help; the staleness is in the
+  dynamic tables, not the client. Clearing the cache re-reads the same stale rows.
+- **Not fixable in the UI.** It belongs in the procedure, so that a worksheet or task leaves
+  the account in the same consistent state the app does.
+
+Activation now calls `SP_REFRESH_CURATED()` before returning. It is rare and deliberate, so
+paying the rebuild inline is the right trade against shipping a page that looks broken. The
+button needs a spinner once you do this, because it stops being instant.
+
+### 9c. An empty panel must not guess at its own cause
+
+The page rendered "No contract position rows. The active contract term may not overlap
+available usage." on an install whose term overlapped usage **by two years**. The message named
+a plausible cause instead of the actual one and sent diagnosis in the wrong direction.
+
+Both bugs in this section cost more to find than to fix, and in both cases the reason was a
+confidently wrong error message. §1 requires that a panel be able to say why it is empty; this
+is the corollary. If the code cannot distinguish "no overlap" from "not yet built", it should
+say what it observed — zero rows — and not volunteer a cause it has not checked.
